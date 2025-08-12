@@ -1,0 +1,332 @@
+import Image from 'next/image'
+import Grid from '@mui/material/Grid2'
+import React, { useEffect, useState, useCallback, useMemo } from 'react'
+import Autocomplete, { createFilterOptions } from '@mui/material/Autocomplete'
+import { Box, Button, debounce, FormLabel, Stack, TextField, Typography } from '@mui/material'
+import { useForm, useFieldArray } from 'react-hook-form'
+import { yupResolver } from '@hookform/resolvers/yup'
+import { MdOutlineDelete } from 'react-icons/md'
+
+import SelectOption from '@/components/_ui/selectOption/Select.component'
+import TextInput from '@/components/_ui/textInputField/TextField.component'
+import ImagePreview from '@/components/imagePreview/ImagePreview.component'
+import AddCustomCard from '@/components/addCustomerCardForm/AddCustomerCardForm'
+import { style } from './SubmissionDetails.style'
+import { schema, TSchema } from './SubmissionDetails.config'
+import { useGetCardListQuery } from '@/redux/api/card.api'
+import { createNewSubmission } from '@/redux/slice/newSubmission.slice'
+import { useReduxDispatch, useReduxSelector } from '@/hooks'
+import { setselectedService } from '@/redux/slice/selectedService.slice'
+import { useUpdateDraftOrderMutation } from '@/redux/api/createOrder.api'
+import { useRouter } from 'next/router'
+import { useUnsavedChangesWarning } from '@/hooks/useUnsavedChangesWarning'
+import { formatCardLabel } from '@/utils/formatLabel.util'
+
+function SubmissionDetails({ handleBack, handleNext, steps, activeStep }: any) {
+  const dispatch = useReduxDispatch()
+  const router = useRouter()
+  const filter = createFilterOptions()
+
+  const [updateDraftOrder] = useUpdateDraftOrderMutation()
+
+  const storeData = useReduxSelector((state) => state.selectedStore)
+  const order = useReduxSelector((state: any) => state.newSubmission.order)
+  const selectedService = useReduxSelector((state) => state.selectedService)
+  const services = storeData?.psaSettings?.services || []
+  const { currency_symbol } = storeData
+
+  const ORDER_ID = router.query.ORDER_ID as string
+
+  const [cardList, setCardList] = useState<any[]>([])
+  const [searchValue, setSearchValue] = useState('')
+  const [isCustomCardFormOpen, setIsCustomCardFormOpen] = useState(false)
+
+  const defaultService = useMemo(() => (selectedService.name ? selectedService : services[0]), [selectedService, services])
+
+  const { data: getCardList, refetch } = useGetCardListQuery({ searchVal: searchValue, page: 1, limit: 25 })
+
+  useEffect(() => {
+    if (getCardList) setCardList(getCardList?.result)
+  }, [getCardList])
+
+  const {
+    control,
+    handleSubmit,
+    setValue,
+    getValues,
+    register,
+    clearErrors,
+    trigger,
+    watch,
+    reset,
+    formState: { errors, isDirty },
+  } = useForm<TSchema>({
+    resolver: yupResolver(schema),
+    context: { maxDeclaredValue: defaultService.max_declared_value, minimumOrderQuantity: defaultService.minimum_card_req },
+  })
+
+  const { fields, append, remove, update } = useFieldArray({ control, name: 'cards' })
+
+  const initializeForm = () => {
+    const items =
+      Array.isArray(order?.orderItems) && order.orderItems.length > 0
+        ? order.orderItems.map((item: any) => ({
+            id: item.id || null,
+            uid: item.uid || null,
+            card_name: item.card_name,
+            declared_value: item.declared_value,
+            image_link: item.image_link || null,
+          }))
+        : [{ id: null, uid: null, card_name: '', declared_value: 0, image_link: null }]
+
+    reset({
+      submissionlevel: `${defaultService.name} - ${currency_symbol} ${defaultService.cost} p/card`,
+      etm: `${defaultService.days} ${defaultService.days_label}`,
+      max_declared_value: defaultService.max_declared_value,
+      cards: items,
+    })
+  }
+
+  useEffect(() => {
+    if (services.length > 0) {
+      dispatch(setselectedService(defaultService))
+      initializeForm()
+    }
+  }, [services, defaultService])
+
+  const debouncedSearch = useCallback(
+    debounce((val) => {
+      setSearchValue(val)
+      refetch()
+    }, 500),
+    [],
+  )
+
+  const handleLevelChange = (label: string) => {
+    const name = label.split(' - ')[0]
+    const service = services.find((s: any) => s.name === name)
+    if (service) {
+      setValue('submissionlevel', `${service.name} - ${currency_symbol} ${service.cost} p/card`)
+      setValue('etm', `${service.days} ${service.days_label}`)
+      setValue('max_declared_value', service.max_declared_value)
+      dispatch(setselectedService(service))
+    }
+  }
+
+  const handleAddCard = () => {
+    append({ id: null, uid: null, card_name: '', declared_value: 0, image_link: null })
+    setSearchValue('')
+    refetch()
+  }
+
+  const getPayload = () => {
+    const formData = getValues()
+    const orderItems = formData.cards?.map(({ id, uid, image_link, declared_value, ...rest }) => ({
+      ...rest,
+      uid: uid ?? null,
+      image_link: image_link || null,
+      declared_value: Number(declared_value),
+    }))
+    return {
+      orderItems: orderItems,
+      orderPSAService: {
+        psa_selected_services: {
+          enable_psa_submissions: storeData?.psaSettings?.enable_psa_submissions || false,
+          card_cleaning_fees: storeData?.psaSettings?.card_cleaning_fees || 0,
+          enable_card_cleaning: storeData?.psaSettings?.enable_card_cleaning || false,
+          psa_setting_service_id: selectedService?.id,
+        },
+      },
+    }
+  }
+
+  const submitForm = async (isDraft = false) => {
+    const isValid = await trigger()
+    if (!isValid) return false
+
+    const payload = getPayload()
+
+    if (isDirty || isDraft) {
+      await updateDraftOrder({ orderId: Number(ORDER_ID), payload }).unwrap()
+    }
+
+    dispatch(createNewSubmission({ ...order, ...payload, orderId: Number(ORDER_ID), storeId: storeData?.id }))
+    return true
+  }
+
+  const handleBackButton = () => {
+    dispatch(createNewSubmission({ ...order, ...getPayload(), orderId: Number(ORDER_ID), storeId: storeData?.id }))
+    handleBack()
+  }
+
+  const onSubmit = async () => {
+    const success = await submitForm()
+    if (success) handleNext()
+  }
+
+  useUnsavedChangesWarning(isDirty)
+
+  return (
+    <Stack sx={style.root}>
+      <Stack component="form" spacing={2.5} onSubmit={handleSubmit(onSubmit)}>
+        <Stack direction="row" spacing={2.5} justifyContent="space-between">
+          <Grid size={{ xs: 12, md: 4 }}>
+            <FormLabel>Submission Level</FormLabel>
+            <SelectOption name="submissionlevel" options={services.map((s) => `${s.name} - ${currency_symbol} ${s.cost} p/card`)} control={control} onChange={(e) => handleLevelChange(e.target.value)} />
+          </Grid>
+          <Grid size={{ xs: 12, md: 4 }}>
+            <TextInput name="etm" control={control} label="Estimated Turnaround Time" disabled />
+          </Grid>
+          <Grid size={{ xs: 12, md: 4 }}>
+            <TextInput name="max_declared_value" control={control} label="Maximum Declared Value p/card USD" disabled currency_symbol={currency_symbol} />
+          </Grid>
+        </Stack>
+
+        <Grid container spacing={2.5}>
+          {fields.map((field, index) => (
+            <React.Fragment key={field.id}>
+              <Grid size={{ xs: 12, md: 2 }}>
+                <FormLabel>{index === 0 && 'Lot Number'}</FormLabel>
+                <Typography>{index + 1}</Typography>
+              </Grid>
+              <Grid size={{ xs: 12, md: 6 }}>
+                {index === 0 && <FormLabel>Card Details</FormLabel>}
+                <Stack direction="row" spacing={2} alignItems="center">
+                  {field.image_link ? <ImagePreview src={field.image_link} alt={`Card-${index + 1}`} /> : <Box width={40} height={40} bgcolor="#f0f0f0" borderRadius={1} />}
+                  <Box sx={{ flex: 1 }}>
+                    <Autocomplete
+                      value={field.card_name || ''}
+                      onInputChange={(_, newInputValue) => debouncedSearch(newInputValue)}
+                      onChange={(_, newValue) => {
+                        if (!newValue) {
+                          update(index, { ...field, id: null, uid: null, card_name: '', declared_value: 0, image_link: null })
+                          return
+                        }
+
+                        if (newValue.isCustom) {
+                          setIsCustomCardFormOpen(true)
+                          return
+                        }
+
+                        // User selected a card from the list
+                        update(index, { ...field, id: null, uid: newValue.uid, card_name: formatCardLabel(newValue), declared_value: newValue.declared_value, image_link: newValue.image_link || '' })
+
+                        setValue(`cards.${index}.uid`, newValue.uid)
+                        setValue(`cards.${index}.declared_value`, newValue.declared_value)
+                        setValue(`cards.${index}.image_link`, newValue.image_link || null)
+
+                        clearErrors(`cards.${index}.card_name`)
+                        // trigger(`cards.${index}.card_name`)
+                        // trigger(`cards.${index}.declared_value`)
+                        // trigger('cards')
+
+                        setSearchValue('')
+                        refetch()
+                      }}
+                      filterOptions={(options, params) => {
+                        const input = params.inputValue.toLowerCase()
+
+                        const filtered = options.filter((option) => {
+                          const label = formatCardLabel(option).toLowerCase()
+                          const number = option.number?.toLowerCase() || ''
+                          const title = option.title?.toLowerCase() || ''
+
+                          return label.includes(input) || number.includes(input) || title.includes(input)
+                        })
+
+                        const manualAddOption = {
+                          label: "Don't see your card? Add it manually",
+                          isCustom: true,
+                        }
+
+                        return [manualAddOption, ...filtered]
+                      }}
+                      options={cardList}
+                      getOptionLabel={(option) => (typeof option === 'string' ? option : option.inputValue ? option.inputValue : formatCardLabel(option))}
+                      renderOption={(props, option) => {
+                        const { key, ...otherProps } = props
+
+                        if (option.isCustom) {
+                          return (
+                            <li key={key} {...otherProps} style={{ fontWeight: 600, color: '#1976d2' }}>
+                              {option.label}
+                            </li>
+                          )
+                        }
+
+                        return (
+                          <li key={key} {...otherProps}>
+                            {option.image_link ? (
+                              <Image src={option.image_link} alt={option.title} width={40} height={40} style={{ marginRight: 10, borderRadius: 4 }} />
+                            ) : (
+                              <Box width={40} height={40} sx={{ bgcolor: '#f0f0f0', borderRadius: 1, marginRight: 1 }} />
+                            )}
+                            {formatCardLabel(option)}
+                          </li>
+                        )
+                      }}
+                      freeSolo
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          {...register(`cards.${index}.card_name` as const)}
+                          placeholder="Enter Card"
+                          error={!!errors.cards?.[index]?.card_name}
+                          helperText={errors.cards?.[index]?.card_name?.message}
+                          fullWidth
+                          size="small"
+                        />
+                      )}
+                    />
+                  </Box>
+                </Stack>
+              </Grid>
+              <Grid size={{ xs: 12, md: 3 }}>
+                <TextInput
+                  name={`cards[${index}].declared_value` as `cards.${number}.declared_value`}
+                  control={control}
+                  label={index === 0 ? 'USD Declared Value' : ''}
+                  placeholder="USD Declared Value"
+                  type="number"
+                  currency_symbol={currency_symbol}
+                />
+              </Grid>
+              {index !== 0 && (
+                <Grid size={{ xs: 12, md: 1 }} display="flex" alignItems="center">
+                  <MdOutlineDelete size={24} onClick={() => remove(index)} style={{ cursor: 'pointer' }} />
+                </Grid>
+              )}
+            </React.Fragment>
+          ))}
+
+          {errors.cards?.root?.message && <Typography color="#d32f2f">{errors.cards?.root?.message}</Typography>}
+
+          <Grid size={{ xs: 12 }}>
+            <Stack direction="row" justifyContent="space-between">
+              <Button size="small" color="error" variant="contained" onClick={handleAddCard}>
+                Add Card
+              </Button>
+              <Button size="small" variant="contained" onClick={() => submitForm(true)}>
+                Update as Draft
+              </Button>
+            </Stack>
+          </Grid>
+        </Grid>
+
+        <Grid size={{ xs: 12 }}>
+          <Stack direction="row" justifyContent="space-between">
+            <Button variant="outlined" onClick={handleBackButton} disabled={activeStep === 0}>
+              Back
+            </Button>
+            <Button type="submit" variant="contained">
+              {activeStep === steps.length - 1 ? 'Finish' : 'Next'}
+            </Button>
+          </Stack>
+        </Grid>
+      </Stack>
+      {isCustomCardFormOpen && <AddCustomCard onClose={() => setIsCustomCardFormOpen(false)} />}
+    </Stack>
+  )
+}
+
+export default SubmissionDetails
